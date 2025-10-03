@@ -1,76 +1,140 @@
 name: Import Issues
 on: { workflow_dispatch: {} }
 permissions: { contents: read, issues: write }
+
 jobs:
   go:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Import issues from issues.csv (strict)
+
+      - name: Import issues from issues.csv (robust)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           python - <<'PY'
-          import csv, os, json, sys, urllib.request
+          import os, json, sys, csv, io, urllib.request
 
           token = os.environ['GH_TOKEN']
           repo  = os.environ['REPO']
-          path  = 'issues.csv'
+          path  = 'issues.csv'  # expects the CSV at the repo root
 
           def api(path_suffix, method='GET', data=None):
+              """Minimal GitHub REST helper using the workflow token."""
               req = urllib.request.Request(f'https://api.github.com/repos/{repo}{path_suffix}', method=method)
               req.add_header('Authorization', f'Bearer {token}')
               req.add_header('Accept', 'application/vnd.github+json')
+              body = None
               if data is not None:
                   body = json.dumps(data).encode('utf-8')
                   req.add_header('Content-Type', 'application/json')
-              else:
-                  body = None
               with urllib.request.urlopen(req, data=body) as resp:
                   return json.load(resp)
 
-          # Load CSV
-          with open(path, newline='', encoding='utf-8') as f:
-              rows = list(csv.DictReader(f))
+          # --- Read & parse CSV (BOM-safe, delimiter-sniffing) ---
+          raw = open(path, 'rb').read()
+          text = raw.decode('utf-8-sig')  # strips BOM if present
+          sample = text[:2048]
+          try:
+              dialect = csv.Sniffer().sniff(sample, delimiters=[',',';','\t','|'])
+          except Exception:
+              class Simple(csv.Dialect):
+                  delimiter = ','
+                  quotechar = '"'
+                  doublequote = True
+                  skipinitialspace = True
+                  lineterminator = '\n'
+                  quoting = csv.QUOTE_MINIMAL
+              dialect = Simple()
+
+          def norm(h):
+              # normalize header names: lowercase, alnum only
+              return ''.join(ch for ch in h.strip().lower() if ch.isalnum())
+
+          rdr = csv.reader(io.StringIO(text), dialect=dialect)
+          headers = next(rdr, [])
+          norm_headers = [norm(h) for h in headers]
+          print("Detected headers:", headers)
+          print("Normalized headers:", norm_headers)
+
+          rows = []
+          for row in rdr:
+              if not any(row):
+                  continue
+              d = {}
+              for i, val in enumerate(row):
+                  key = norm_headers[i] if i < len(norm_headers) else f"col{i}"
+                  d[key] = (val or '').strip()
+              rows.append(d)
+
           print(f"CSV rows found: {len(rows)}")
-          print("Sample titles:", [ (r.get('Title') or '').strip() for r in rows[:3] ])
+
+          def get(d, *candidates):
+              """Return first non-empty field by any of these candidate header names."""
+              for c in candidates:
+                  k = norm(c)
+                  if k in d and d[k]:
+                      return d[k]
+              return ""
 
           if not rows:
-              print("ERROR: issues.csv had 0 rows (no headers or wrong location).")
+              print("ERROR: no rows parsed; check CSV location/format.")
               sys.exit(1)
 
-          # Ensure milestones
+          # Show sample titles (helps debug header mapping)
+          preview = [get(r, 'Title') or get(r, 'Task','Name','Summary') for r in rows[:3]]
+          print("Sample titles:", preview)
+
+          # --- Ensure milestones referenced in CSV exist ---
+          def ensure_milestone(title):
+              if not title:
+                  return None
+              ms = api('/milestones?state=all&per_page=100')
+              for m in ms:
+                  if m['title'].lower() == title.lower():
+                      return m['number']
+              created = api('/milestones','POST',{'title': title})
+              return created['number']
+
           ms_cache = {}
           for r in rows:
-              m = (r.get('Milestone') or '').strip()
+              m = get(r, 'Milestone')
               if m and m not in ms_cache:
-                  # find existing
-                  ms = api('/milestones?state=all&per_page=100')
-                  num = next((x['number'] for x in ms if x['title'].lower()==m.lower()), None)
-                  if not num:
-                      num = api('/milestones','POST',{'title': m})['number']
-                  ms_cache[m] = num
+                  try:
+                      ms_cache[m] = ensure_milestone(m)
+                  except Exception as e:
+                      print('Milestone error:', m, e)
 
+          # --- Create issues ---
           created = 0
           for r in rows:
-              title = (r.get('Title') or '').strip()
+              title = get(r, 'Title') or get(r, 'Task','Name','Summary')
               if not title:
-                  continue
-              body  = (r.get('Body') or '').strip()
-              labels = [s.strip() for s in (r.get('Labels') or '').split(',') if s.strip()]
-              mtitle = (r.get('Milestone') or '').strip()
-              payload = {'title': title}
-              if body: payload['body'] = body
-              if labels: payload['labels'] = labels
-              if mtitle: payload['milestone'] = ms_cache.get(mtitle)
+                  continue  # skip rows with no title
+              body   = get(r, 'Body','Description','Notes')
+              labels_raw = get(r, 'Labels','Label')
+              labels = [x.strip() for x in labels_raw.split(',') if x.strip()] if labels_raw else []
+              mtitle = get(r, 'Milestone')
 
-              issue = api('/issues','POST', payload)
-              print('Created:', issue['html_url'])
-              created += 1
+              payload = {'title': title}
+              if body:
+                  payload['body'] = body
+              if labels:
+                  payload['labels'] = labels
+              if mtitle:
+                  payload['milestone'] = ms_cache.get(mtitle)
+
+              try:
+                  issue = api('/issues','POST', payload)
+                  print('Created:', issue['html_url'])
+                  created += 1
+              except Exception as e:
+                  # Surface the server message to the logs
+                  print('Create failed for title:', title, '\n', e, file=sys.stderr)
 
           if created == 0:
-              print("ERROR: 0 issues created (permissions or API problem).")
+              print("ERROR: 0 issues created.")
               sys.exit(1)
           else:
               print(f"Done. Created {created} issues.")
