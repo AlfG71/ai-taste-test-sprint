@@ -6,38 +6,72 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Create issues from issues.csv
+      - name: Import issues from issues.csv (strict)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           python - <<'PY'
-          import csv, os, json, urllib.request
-          repo = os.environ['REPO']; token = os.environ['GH_TOKEN']
-          def api(path, method='GET', data=None):
-              req = urllib.request.Request(f'https://api.github.com/repos/{repo}{path}', method=method)
+          import csv, os, json, sys, urllib.request
+
+          token = os.environ['GH_TOKEN']
+          repo  = os.environ['REPO']
+          path  = 'issues.csv'
+
+          def api(path_suffix, method='GET', data=None):
+              req = urllib.request.Request(f'https://api.github.com/repos/{repo}{path_suffix}', method=method)
               req.add_header('Authorization', f'Bearer {token}')
               req.add_header('Accept', 'application/vnd.github+json')
               if data is not None:
-                  req.add_header('Content-Type','application/json')
-                  data = json.dumps(data).encode()
-              return json.load(urllib.request.urlopen(req, data))
-          def ensure_ms(title):
-              if not title: return None
-              for m in api('/milestones?state=all&per_page=100'):
-                  if m['title'].lower()==title.lower(): return m['number']
-              return api('/milestones','POST',{'title':title})['number']
-          rows = list(csv.DictReader(open('issues.csv', newline='', encoding='utf-8')))
+                  body = json.dumps(data).encode('utf-8')
+                  req.add_header('Content-Type', 'application/json')
+              else:
+                  body = None
+              with urllib.request.urlopen(req, data=body) as resp:
+                  return json.load(resp)
+
+          # Load CSV
+          with open(path, newline='', encoding='utf-8') as f:
+              rows = list(csv.DictReader(f))
+          print(f"CSV rows found: {len(rows)}")
+          print("Sample titles:", [ (r.get('Title') or '').strip() for r in rows[:3] ])
+
+          if not rows:
+              print("ERROR: issues.csv had 0 rows (no headers or wrong location).")
+              sys.exit(1)
+
+          # Ensure milestones
           ms_cache = {}
           for r in rows:
               m = (r.get('Milestone') or '').strip()
-              if m and m not in ms_cache: ms_cache[m]=ensure_ms(m)
+              if m and m not in ms_cache:
+                  # find existing
+                  ms = api('/milestones?state=all&per_page=100')
+                  num = next((x['number'] for x in ms if x['title'].lower()==m.lower()), None)
+                  if not num:
+                      num = api('/milestones','POST',{'title': m})['number']
+                  ms_cache[m] = num
+
+          created = 0
           for r in rows:
-              t=(r.get('Title') or '').strip()
-              if not t: continue
-              body=(r.get('Body') or '').strip()
-              labels=[x.strip() for x in (r.get('Labels') or '').split(',') if x.strip()]
-              m=(r.get('Milestone') or '').strip()
-              issue = api('/issues','POST',{'title':t, **({'body':body} if body else {}), **({'labels':labels} if labels else {}), **({'milestone':ms_cache.get(m)} if m else {})})
+              title = (r.get('Title') or '').strip()
+              if not title:
+                  continue
+              body  = (r.get('Body') or '').strip()
+              labels = [s.strip() for s in (r.get('Labels') or '').split(',') if s.strip()]
+              mtitle = (r.get('Milestone') or '').strip()
+              payload = {'title': title}
+              if body: payload['body'] = body
+              if labels: payload['labels'] = labels
+              if mtitle: payload['milestone'] = ms_cache.get(mtitle)
+
+              issue = api('/issues','POST', payload)
               print('Created:', issue['html_url'])
+              created += 1
+
+          if created == 0:
+              print("ERROR: 0 issues created (permissions or API problem).")
+              sys.exit(1)
+          else:
+              print(f"Done. Created {created} issues.")
           PY
