@@ -1,0 +1,43 @@
+name: Import Issues
+on: { workflow_dispatch: {} }
+permissions: { contents: read, issues: write }
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create issues from issues.csv
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import csv, os, json, urllib.request
+          repo = os.environ['REPO']; token = os.environ['GH_TOKEN']
+          def api(path, method='GET', data=None):
+              req = urllib.request.Request(f'https://api.github.com/repos/{repo}{path}', method=method)
+              req.add_header('Authorization', f'Bearer {token}')
+              req.add_header('Accept', 'application/vnd.github+json')
+              if data is not None:
+                  req.add_header('Content-Type','application/json')
+                  data = json.dumps(data).encode()
+              return json.load(urllib.request.urlopen(req, data))
+          def ensure_ms(title):
+              if not title: return None
+              for m in api('/milestones?state=all&per_page=100'):
+                  if m['title'].lower()==title.lower(): return m['number']
+              return api('/milestones','POST',{'title':title})['number']
+          rows = list(csv.DictReader(open('issues.csv', newline='', encoding='utf-8')))
+          ms_cache = {}
+          for r in rows:
+              m = (r.get('Milestone') or '').strip()
+              if m and m not in ms_cache: ms_cache[m]=ensure_ms(m)
+          for r in rows:
+              t=(r.get('Title') or '').strip()
+              if not t: continue
+              body=(r.get('Body') or '').strip()
+              labels=[x.strip() for x in (r.get('Labels') or '').split(',') if x.strip()]
+              m=(r.get('Milestone') or '').strip()
+              issue = api('/issues','POST',{'title':t, **({'body':body} if body else {}), **({'labels':labels} if labels else {}), **({'milestone':ms_cache.get(m)} if m else {})})
+              print('Created:', issue['html_url'])
+          PY

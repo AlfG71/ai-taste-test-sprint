@@ -1,5 +1,3 @@
-Title,Body,Assignee,Milestone,Labels,Estimate
-Project setup,"Create repo, commit scaffold, add README and docs",,Week 1,"chore,planning",1
 Choose stack & embedding model,"Decide Node vs Python, choose embedding + vector store; create env.example",,Week 1,"design,backend",2
 PDF upload & parsing,Implement upload endpoint and PDF text extraction,,Week 1,backend,3
 Chunking & embeddings,Implement chunker and indexing job,,Week 1,"backend,vector",3
