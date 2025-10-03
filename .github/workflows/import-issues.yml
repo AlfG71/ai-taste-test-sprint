@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Import issues from issues.csv (robust)
+      - name: Import issues from issues.csv (headerless-friendly)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -21,7 +21,6 @@ jobs:
           path  = 'issues.csv'  # expects the CSV at the repo root
 
           def api(path_suffix, method='GET', data=None):
-              """Minimal GitHub REST helper using the workflow token."""
               req = urllib.request.Request(f'https://api.github.com/repos/{repo}{path_suffix}', method=method)
               req.add_header('Authorization', f'Bearer {token}')
               req.add_header('Accept', 'application/vnd.github+json')
@@ -32,12 +31,13 @@ jobs:
               with urllib.request.urlopen(req, data=body) as resp:
                   return json.load(resp)
 
-          # --- Read & parse CSV (BOM-safe, delimiter-sniffing) ---
+          # --- Read raw and sniff delimiter; strip BOM if present ---
           raw = open(path, 'rb').read()
-          text = raw.decode('utf-8-sig')  # strips BOM if present
+          text = raw.decode('utf-8-sig')
           sample = text[:2048]
           try:
               dialect = csv.Sniffer().sniff(sample, delimiters=[',',';','\t','|'])
+            # If sniff fails, default to comma
           except Exception:
               class Simple(csv.Dialect):
                   delimiter = ','
@@ -48,90 +48,106 @@ jobs:
                   quoting = csv.QUOTE_MINIMAL
               dialect = Simple()
 
-          def norm(h):
-              # normalize header names: lowercase, alnum only
-              return ''.join(ch for ch in h.strip().lower() if ch.isalnum())
-
           rdr = csv.reader(io.StringIO(text), dialect=dialect)
-          headers = next(rdr, [])
-          norm_headers = [norm(h) for h in headers]
-          print("Detected headers:", headers)
-          print("Normalized headers:", norm_headers)
-
-          rows = []
-          for row in rdr:
-              if not any(row):
-                  continue
-              d = {}
-              for i, val in enumerate(row):
-                  key = norm_headers[i] if i < len(norm_headers) else f"col{i}"
-                  d[key] = (val or '').strip()
-              rows.append(d)
-
-          print(f"CSV rows found: {len(rows)}")
-
-          def get(d, *candidates):
-              """Return first non-empty field by any of these candidate header names."""
-              for c in candidates:
-                  k = norm(c)
-                  if k in d and d[k]:
-                      return d[k]
-              return ""
-
-          if not rows:
-              print("ERROR: no rows parsed; check CSV location/format.")
+          first_row = next(rdr, None)
+          if first_row is None:
+              print("ERROR: CSV is empty.")
               sys.exit(1)
 
-          # Show sample titles (helps debug header mapping)
-          preview = [get(r, 'Title') or get(r, 'Task','Name','Summary') for r in rows[:3]]
-          print("Sample titles:", preview)
+          # Detect whether the first row is a header or actual data.
+          # Heuristic: if any cell in the first row contains these keywords, treat it as a header.
+          header_candidates = ['title','body','description','labels','label','milestone','assignee','estimate']
+          def looks_like_header(row):
+              s = " ".join((row or [])).lower()
+              return any(k in s for k in header_candidates)
 
-          # --- Ensure milestones referenced in CSV exist ---
+          header_is_present = looks_like_header(first_row)
+          rows = []
+
+          if header_is_present:
+              headers = [h.strip() for h in first_row]
+              print("Detected header row:", headers)
+              for row in rdr:
+                  if not any(row):
+                      continue
+                  rows.append(row)
+              # Map by header name (normalized)
+              def norm(h): return ''.join(ch for ch in h.strip().lower() if ch.isalnum())
+              header_map = {norm(h): i for i, h in enumerate(headers)}
+
+              def get_field(r, *names):
+                  for n in names:
+                      i = header_map.get(norm(n))
+                      if i is not None and i < len(r) and r[i].strip():
+                          return r[i].strip()
+                  return ""
+              def get_title(r): return get_field(r, 'Title','Task','Name','Summary')
+              def get_body(r): return get_field(r, 'Body','Description','Notes')
+              def get_labels(r): return get_field(r, 'Labels','Label')
+              def get_milestone(r): return get_field(r, 'Milestone')
+              def get_assignee(r): return get_field(r, 'Assignee')
+
+          else:
+              # No header: treat the first row as data and use fixed column positions:
+              # 0: Title, 1: Body, 2: Assignee, 3: Milestone, 4: Labels, (5: Estimate ignored)
+              print("No header detected. Using positional columns: [Title, Body, Assignee, Milestone, Labels, (Estimate)]")
+              rows.append(first_row)
+              for row in rdr:
+                  if not any(row):
+                      continue
+                  rows.append(row)
+
+              def col(r, i): return (r[i].strip() if i < len(r) and r[i] is not None else "")
+              def get_title(r): return col(r, 0)
+              def get_body(r): return col(r, 1)
+              def get_assignee(r): return col(r, 2)
+              def get_milestone(r): return col(r, 3)
+              def get_labels(r): return col(r, 4)
+
+          print(f"CSV data rows: {len(rows)}")
+          print("Sample titles:", [get_title(r) for r in rows[:3]])
+
+          # --- Ensure milestones exist ---
           def ensure_milestone(title):
-              if not title:
+              if not title: return None
+              try:
+                  ms = api('/milestones?state=all&per_page=100')
+                  for m in ms:
+                      if m['title'].lower() == title.lower():
+                          return m['number']
+                  created = api('/milestones','POST',{'title': title})
+                  return created['number']
+              except Exception as e:
+                  print("Milestone error:", title, e)
                   return None
-              ms = api('/milestones?state=all&per_page=100')
-              for m in ms:
-                  if m['title'].lower() == title.lower():
-                      return m['number']
-              created = api('/milestones','POST',{'title': title})
-              return created['number']
 
           ms_cache = {}
           for r in rows:
-              m = get(r, 'Milestone')
+              m = get_milestone(r)
               if m and m not in ms_cache:
-                  try:
-                      ms_cache[m] = ensure_milestone(m)
-                  except Exception as e:
-                      print('Milestone error:', m, e)
+                  ms_cache[m] = ensure_milestone(m)
 
           # --- Create issues ---
           created = 0
           for r in rows:
-              title = get(r, 'Title') or get(r, 'Task','Name','Summary')
+              title = get_title(r)
               if not title:
-                  continue  # skip rows with no title
-              body   = get(r, 'Body','Description','Notes')
-              labels_raw = get(r, 'Labels','Label')
+                  continue
+              body   = get_body(r)
+              labels_raw = get_labels(r)
               labels = [x.strip() for x in labels_raw.split(',') if x.strip()] if labels_raw else []
-              mtitle = get(r, 'Milestone')
-
+              mtitle = get_milestone(r)
               payload = {'title': title}
-              if body:
-                  payload['body'] = body
-              if labels:
-                  payload['labels'] = labels
-              if mtitle:
-                  payload['milestone'] = ms_cache.get(mtitle)
+              if body: payload['body'] = body
+              if labels: payload['labels'] = labels
+              if mtitle: payload['milestone'] = ms_cache.get(mtitle)
 
               try:
                   issue = api('/issues','POST', payload)
                   print('Created:', issue['html_url'])
                   created += 1
               except Exception as e:
-                  # Surface the server message to the logs
-                  print('Create failed for title:', title, '\n', e, file=sys.stderr)
+                  print('Create failed for title:', title, e)
 
           if created == 0:
               print("ERROR: 0 issues created.")
