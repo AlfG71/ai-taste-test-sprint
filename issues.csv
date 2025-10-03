@@ -1,0 +1,17 @@
+Title,Body,Assignee,Milestone,Labels,Estimate
+Project setup,"Create repo, commit scaffold, add README and docs",,Week 1,"chore,planning",1
+Choose stack & embedding model,"Decide Node vs Python, choose embedding + vector store; create env.example",,Week 1,"design,backend",2
+PDF upload & parsing,Implement upload endpoint and PDF text extraction,,Week 1,backend,3
+Chunking & embeddings,Implement chunker and indexing job,,Week 1,"backend,vector",3
+Retrieval endpoint,Top-k search with cosine; return contexts,,Week 1,"backend,vector",2
+Answer composer,"Prompt with citation requirements; return JSON {{answer, citations}}",,Week 1,"backend,ai",2
+React UI - chat,Chat box with streaming and citation UI,,Week 1,frontend,3
+Telemetry,Log latency and token usage for each request,,Week 1,"backend,observability",1
+Guardrails v1,"Input sanitizer, output length cap, simple PI filter",,Week 1,"security,backend",2
+Eval set creation,Draft 20–30 Q/A pairs from sample PDFs,,Week 2,"evals,docs",2
+Eval harness,Run test set; compute accuracy & citation correctness,,Week 2,"evals,backend",3
+Groundedness check,Validate citations contain answer spans; fallback if missing,,Week 2,"backend,ai",2
+Rate limiting & timeouts,Add per-IP/user limits and request timeouts,,Week 2,"security,backend",1
+UX polish,Clickable citation highlights; empty states/errors,,Week 2,"frontend,ux",2
+Cost & latency report,Measure p50/p95 latency; estimate $/100 queries,,Week 2,"observability,docs",1
+Case study write-up,"One-pager: goal, solution, metrics, failure modes, next",,Week 2,docs,2

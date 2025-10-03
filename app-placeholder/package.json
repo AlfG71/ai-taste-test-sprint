@@ -1,0 +1,9 @@
+{
+  "name": "ai-taste-test-placeholder",
+  "private": true,
+  "version": "0.0.1",
+  "scripts": {
+    "test": "echo \"(add tests)\" && exit 0",
+    "lint": "echo \"(add lints)\" && exit 0"
+  }
+}
